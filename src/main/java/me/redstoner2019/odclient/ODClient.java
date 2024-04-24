@@ -1,38 +1,45 @@
-package me.redstoner2019.serverhandling;
+package me.redstoner2019.odclient;
 
-import me.redstoner2019.main.Main;
-import me.redstoner2019.main.data.packets.gamepackets.ChatPacket;
+import me.redstoner2019.defaultpackets.ACK;
+import me.redstoner2019.util.ConnectionProtocol;
+import me.redstoner2019.defaultpackets.Packet;
+import me.redstoner2019.defaultpackets.ConnectRequestPacket;
+import me.redstoner2019.events.ConnectionFailedEvent;
+import me.redstoner2019.events.ConnectionLostEvent;
+import me.redstoner2019.events.ConnectionSuccessEvent;
+import me.redstoner2019.events.PacketListener;
+import me.redstoner2019.util.Util;
 
 import java.io.*;
 import java.net.Socket;
 import java.net.SocketException;
 import java.net.UnknownHostException;
-import java.util.ArrayDeque;
-import java.util.ArrayList;
-import java.util.List;
-import java.util.Queue;
+import java.util.*;
 
-public class Client {
+import static me.redstoner2019.util.ConnectionProtocol.TCP;
+
+public class ODClient {
     public static Socket socket = null;
     public static ObjectOutputStream out;
     public static ObjectInputStream in;
     public static PacketListener listener;
     public static boolean isConnected = false;
-    public static ConnectionFailedEvent connectionFailEvent = null;
-    public static ConnectionSuccessEvent connectionSuccessEvent = null;
-    public static ConnectionLostEvent connectionLostEvent = null;
-    public static int packetsRecieved = 0;
-    public static int packetsSent = 0;
+    public static ConnectionFailedEvent connectionFailEvent = reason -> {};
+    public static ConnectionSuccessEvent connectionSuccessEvent = () -> {};
+    public static ConnectionLostEvent connectionLostEvent = reason -> {};
     private static List<Object> toSend = new ArrayList<>();
+    private static ConnectionProtocol protocol;
+    public static HashMap<String, PacketCache> packetCache = new HashMap<>();
 
     public static void setConnectionLostEvent(ConnectionLostEvent connectionLostEvent) {
-        Client.connectionLostEvent = connectionLostEvent;
+        ODClient.connectionLostEvent = connectionLostEvent;
     }
 
     public static boolean isConnected(){
         return isConnected;
     }
-    public static void connect(String address, int port){
+    public static void connect(String address, int port, ConnectionProtocol connProtocol){
+        protocol = connProtocol;
         try {
             socket = new Socket(address,port);
             in = new ObjectInputStream(socket.getInputStream());
@@ -54,8 +61,20 @@ public class Client {
                         }
                         try {
                             Object o = in.readObject();
-                            listener.packetRecievedEvent(o);
-                            packetsRecieved++;
+                            if(protocol.equals(TCP)) {
+                                if (o instanceof ACK p) {
+                                    if (packetCache.containsKey(p.getUuid())) {
+                                        packetCache.remove(p.getUuid());
+                                    }
+                                } else if (o instanceof Packet p) {
+                                    sendObject(new ACK(p.uuid, 0));
+                                    listener.packetRecievedEvent(o);
+                                } else {
+                                    listener.packetRecievedEvent(o);
+                                }
+                            } else {
+                                listener.packetRecievedEvent(o);
+                            }
                         } catch (ClassNotFoundException ignored){
                             System.err.println("Class not found");
                             ignored.printStackTrace();
@@ -72,17 +91,14 @@ public class Client {
                                 break;
                             }
                         } catch (SocketException ignored){
-                            System.err.println("Socket not connected");
-                            System.err.println(ignored.getLocalizedMessage());
                             if(connectionLostEvent != null) connectionLostEvent.onConnectionLostEvent(ignored.getLocalizedMessage());
                             break;
                         } catch (EOFException ignored){
-                            //System.err.println("EOFException");
-                            //disconnect();
                             try {
                                 in.reset();
                             } catch (IOException e) {
-
+                                connectionLostEvent.onConnectionLostEvent(e.getLocalizedMessage());
+                                disconnect();
                             }
                         }catch (Exception e) {
                             System.err.println("Lukas du hurensohn was hast du getan dass dies ausgegeben wird");
@@ -91,7 +107,9 @@ public class Client {
                             if(connectionLostEvent != null) connectionLostEvent.onConnectionLostEvent(e.getClass() + " " + e.getLocalizedMessage());
                             try {
                                 out.flush();
-                            } catch (IOException ex) {}
+                            } catch (IOException ex) {
+
+                            }
                             break;
                         }
                     }
@@ -99,32 +117,32 @@ public class Client {
                 }
             });
             t.start();
+            sendObject(new ConnectRequestPacket(protocol));
         } catch (SocketException e) {
             if(connectionFailEvent != null) connectionFailEvent.onConnectionFailedEvent(e);
             System.err.println("Couldnt connect, socket exception!");
-            System.out.println(e.getLocalizedMessage());
+            Util.log(e.getLocalizedMessage());
         } catch (UnknownHostException e) {
             if(connectionFailEvent != null) connectionFailEvent.onConnectionFailedEvent(e);
             System.err.println("Unknown Host");
-            System.out.println(e.getLocalizedMessage());
+            Util.log(e.getLocalizedMessage());
         } catch (IOException e) {
             if(connectionFailEvent != null) connectionFailEvent.onConnectionFailedEvent(e);
             e.printStackTrace();
         }
     }
     public static String lastObjectSendName = "";
-    public static long lastSent = 0;
     public static void sendObject(Object o){
         try {
             toSend.add(o);
         }catch (Exception e){
-            System.out.println("Clearing Buffer");
+            Util.log("Clearing Buffer");
             toSend.clear();
         }
     }
-    public static void startSender() throws Exception {
-        System.out.println("Started sender");
+    public static void startSender() {
         final Object REFERENCE = new Object();
+        final long TIMEOUT = 2000;
         Thread t = new Thread(new Runnable() {
             @Override
             public void run() {
@@ -134,21 +152,40 @@ public class Client {
                             toSend.clear();
                             continue;
                         }
+
+                        Iterator<String> uuids = packetCache.keySet().iterator();
+
+                        if(protocol.equals(TCP)) while (uuids.hasNext()){
+                            String uuid = uuids.next();
+                            PacketCache pc = packetCache.get(uuid);
+                            if(pc == null) continue;
+                            if(System.currentTimeMillis() - pc.getSendTime() > TIMEOUT){
+                                sendObject(pc.getPacket());
+                                uuids.remove();
+                            }
+                        }
+
                         if(toSend.isEmpty()) continue;
+
                         Object o = toSend.get(0);
                         toSend.remove(0);
+
                         if(o == null) continue;
-                        lastSent = System.currentTimeMillis();
-                        Packet p = (Packet) o;
-                        p.setVersion(Main.getVersion());
-                        o = p;
+
+                        if(protocol.equals(TCP)) if(o instanceof Packet p){
+                            if(!(p instanceof ACK) && p.uuid == null){
+                                p.uuid = Util.createUUID();
+                                packetCache.put(p.uuid,new PacketCache(System.currentTimeMillis(),p));
+                            }
+                        }
+
                         try {
                             lastObjectSendName = o.getClass().toString();
                             out.writeObject(o);
                             out.flush();
-                            packetsSent++;
-                        } catch (SocketException ignored){
-
+                        } catch (SocketException e){
+                            connectionLostEvent.onConnectionLostEvent(e.getLocalizedMessage());
+                            return;
                         } catch (IOException e) {
                             e.printStackTrace();
                         }
@@ -178,5 +215,30 @@ public class Client {
     }
     public static int packetsInBuffer(){
         return toSend.size();
+    }
+}
+class PacketCache{
+    private long sendTime;
+    private Packet packet;
+
+    public Packet getPacket() {
+        return packet;
+    }
+
+    public void setPacket(Packet packet) {
+        this.packet = packet;
+    }
+
+    public long getSendTime() {
+        return sendTime;
+    }
+
+    public void setSendTime(long sendTime) {
+        this.sendTime = sendTime;
+    }
+
+    public PacketCache(long sendTime, Packet packet) {
+        this.sendTime = sendTime;
+        this.packet = packet;
     }
 }

@@ -1,4 +1,4 @@
-package me.redstoner2019.serverhandling;
+package me.redstoner2019.util;
 
 import java.io.IOException;
 import java.net.InetAddress;

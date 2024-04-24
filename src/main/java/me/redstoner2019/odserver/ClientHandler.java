@@ -1,14 +1,16 @@
-package me.redstoner2019.serverhandling;
+package me.redstoner2019.odserver;
 
-import me.redstoner2019.main.Main;
-import me.redstoner2019.main.data.packets.loginpackets.DisconnectPacket;
-import me.redstoner2019.main.serverstuff.ServerMain;
+import me.redstoner2019.defaultpackets.ACK;
+import me.redstoner2019.defaultpackets.Packet;
+import me.redstoner2019.util.Util;
+import me.redstoner2019.events.PacketListener;
 
 import java.io.*;
 import java.net.Socket;
 import java.net.SocketException;
-import java.util.ArrayList;
-import java.util.List;
+import java.util.*;
+
+import static me.redstoner2019.util.ConnectionProtocol.TCP;
 
 public class ClientHandler {
     private ObjectInputStream in;
@@ -16,6 +18,8 @@ public class ClientHandler {
     private Socket socket;
     private boolean connected = true;
     private List<Object> toSend = new ArrayList<>();
+    private static final Object REFERENCE = new Object();
+    public static HashMap<String, PacketCache> packetCache = new HashMap<>();
 
     public ClientHandler(ObjectInputStream in, ObjectOutputStream out, Socket socket) {
         this.in = in;
@@ -46,18 +50,16 @@ public class ClientHandler {
     public void setSocket(Socket socket) {
         this.socket = socket;
     }
-    private int unuscessful_resets = 0;
     public void disconnect(){
         try {
             socket.close();
-            Client.isConnected = false;
             connected = false;
         } catch (IOException e) {
             e.printStackTrace();
         }
     }
     public void startPacketSender(){
-        final Object REFERENCE = new Object();
+        final long TIMEOUT = 2000;
         Thread t = new Thread(new Runnable() {
             @Override
             public void run() {
@@ -67,93 +69,105 @@ public class ClientHandler {
                             toSend.clear();
                             break;
                         }
-                        if(toSend.isEmpty()) {
-                            try {
-                                REFERENCE.wait(1);
-                            } catch (InterruptedException e) {
-                                throw new RuntimeException(e);
+
+                        Iterator<String> uuids = packetCache.keySet().iterator();
+
+                        if(ODServer.getProtocol().equals(TCP)) while (uuids.hasNext()){
+                            try{
+                                String uuid = uuids.next();
+                                PacketCache pc = packetCache.get(uuid);
+                                if(System.currentTimeMillis() - pc.getSendTime() > TIMEOUT){
+                                    sendObject(pc.getPacket());
+                                    uuids.remove();
+                                }
+                            } catch (Exception e){
+
                             }
+                        }
+
+                        if(toSend.isEmpty()) {
                             continue;
                         }
                         while (!toSend.isEmpty()){
                             Object o = toSend.get(0);
                             toSend.remove(0);
+
                             if(o == null) continue;
-                            if(o instanceof Packet p) {
-                                p.setVersion(Main.getVersion());
+
+                            if(ODServer.getProtocol().equals(TCP)) if(o instanceof Packet p){
+                                if(!(p instanceof ACK)){
+                                    p.uuid = Util.createUUID();
+                                    packetCache.put(p.uuid,new PacketCache(System.currentTimeMillis(),p));
+                                }
                             }
+
                             try {
                                 out.writeObject(o);
                                 out.flush();
-                                ServerMain.packetsSent++;
-                                if(o instanceof DisconnectPacket){
-                                    connected = false;
-                                    return;
-                                }
                             } catch (IOException e) {
                                 e.printStackTrace();
                             }
                         }
                     }
                 }
-                System.out.println("Sender closed");
+                Util.log("Sender closed");
                 Thread.currentThread().interrupt();
             }
         });
         t.start();
     }
     public void startPacketListener(final PacketListener listener){
-        System.out.println("Started Packet Listener");
+        ClientHandler thisHandler = this;
         Thread t = new Thread(new Runnable() {
             @Override
             public void run() {
-                boolean run = true;
-                while (run){
+                while (true){
                     Object o = null;
                     if(socket.isClosed()){
-                        Server.getClients().remove(this);
-                        Util.log("Client disconnected"); //8008135
+                        ODServer.getClients().remove(thisHandler);
+                        Util.log("Client disconnected");
                         connected = false;
-                        run = false;
                         break;
                     }
                     try {
                         o = getIn().readObject();
-                        ServerMain.packetsrecieved++;
                     } catch (ClassNotFoundException ignored) {
-                        System.out.println("ClassNotFoundExeption");
+                        Util.log("ClassNotFoundExeption");
                     } catch (EOFException ignored) {
-                        System.out.println("EOFException");
+                        Util.log("EOFException");
                         try {
                             getIn().close();
                             setIn(new ObjectInputStream(socket.getInputStream()));
-                            System.out.println(getIn());
-                            unuscessful_resets = 0;
                         } catch (IOException e) {
-                            System.out.println("Reset unsuccesful");
-                            unuscessful_resets++;
-                        }
-                        if(unuscessful_resets == 10) {
-                            sendObject(new DisconnectPacket("Stream corrupted"));
+                            Util.log("Reset unsuccesful");
                             disconnect();
                         }
                         break;
                     } catch (SocketException e) {
-                        System.out.println(e.getLocalizedMessage());
+                        Util.log(e.getLocalizedMessage());
                         if(e.getLocalizedMessage().equals("Connection reset")){
-                            Server.getClients().remove(this);
+                            ODServer.getClients().remove(thisHandler);
                             Util.log("Client disconnected"); //8008135
                             connected = false;
                             break;
                         }
                     } catch (IOException e){
                         e.printStackTrace();
-                        /*Server.getClients().remove(this);
-                        Util.log("Client disconnected"); //8008135
-                        run = false;
-                        break;*/
                     }
-                    listener.packetRecievedEvent((Packet) o);
+                    if(ODServer.getProtocol().equals(TCP)) {
+                        if (o instanceof ACK p) {
+                            if (packetCache.containsKey(p.getUuid())) {
+                                packetCache.remove(p.getUuid());
+                            }
+                        } else if (o instanceof Packet p) {
+                            sendObject(new ACK(p.uuid, 0));
+                            listener.packetRecievedEvent(o);
+                        } else {
+                            listener.packetRecievedEvent(o);
+                        }
+                    } else {
+                        listener.packetRecievedEvent(o);
+                    }
                 }
             }
         });
@@ -164,7 +178,7 @@ public class ClientHandler {
         try {
             toSend.add(packet);
         }catch (Exception e){
-            System.out.println("Clearing Buffer");
+            Util.log("Clearing Buffer");
             toSend.clear();
         }
     }
@@ -178,5 +192,31 @@ public class ClientHandler {
     }
     public int packetsInBuffer(){
         return toSend.size();
+    }
+}
+
+class PacketCache{
+    private long sendTime;
+    private Packet packet;
+
+    public Packet getPacket() {
+        return packet;
+    }
+
+    public void setPacket(Packet packet) {
+        this.packet = packet;
+    }
+
+    public long getSendTime() {
+        return sendTime;
+    }
+
+    public void setSendTime(long sendTime) {
+        this.sendTime = sendTime;
+    }
+
+    public PacketCache(long sendTime, Packet packet) {
+        this.sendTime = sendTime;
+        this.packet = packet;
     }
 }

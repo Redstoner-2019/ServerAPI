@@ -1,4 +1,4 @@
-package me.redstoner2019.serverhandling;
+package me.redstoner2019.util;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 
@@ -11,11 +11,22 @@ import java.io.FileOutputStream;
 import java.io.IOException;
 import java.nio.charset.Charset;
 import java.nio.file.Files;
+import java.util.Calendar;
 import java.util.Date;
+import java.util.UUID;
 
 public class Util {
     public static void log(String message){
-        System.out.println(message);
+        Calendar calendar = Calendar.getInstance();
+        System.out.println(String.format("[%02d:%02d:%02d.%03d]: %s",calendar.get(Calendar.HOUR_OF_DAY), calendar.get(Calendar.MINUTE), calendar.get(Calendar.SECOND), calendar.get(Calendar.MILLISECOND), message));
+    }
+    public static void log(Object o){
+        String message = o.toString();
+        Calendar calendar = Calendar.getInstance();
+        System.out.println(String.format("[%02d:%02d:%02d.%03d]: %s",calendar.get(Calendar.HOUR_OF_DAY), calendar.get(Calendar.MINUTE), calendar.get(Calendar.SECOND), calendar.get(Calendar.MILLISECOND), message));
+    }
+    public static String createUUID(){
+        return UUID.randomUUID().toString().substring(0,5);
     }
 
     public static void writeStringToFile(String str, File file) throws IOException {
